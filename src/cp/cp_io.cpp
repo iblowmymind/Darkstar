@@ -47,26 +47,64 @@ void CpIo::Reset()
 // ---------------------------------------------------------------------------
 // CpIo::ExecuteIOOut
 //
-// Implementation plan for a future session:
-//   YIOOutFunction fn = static_cast<YIOOutFunction>(mi.fY);
-//   switch (fn) {
-//     DCtlFifo: _system->GetDisplayController()->SetDCtlFifo(aluOut); break;
-//     DCtl:     _system->GetDisplayController()->SetDCtl(aluOut); break;
-//     DBorder:  _system->GetDisplayController()->SetDBorder(aluOut); break;
-//     MCtl:     _system->GetMemoryController()->SetMCtl(aluOut); break;
-//     IOPOData: _iopOutputData = aluOut; break;
-//     IOPCtl:   _iopCtl = aluOut; /* TODO: trigger RST7.5 */ break;
-//     KOData/KCtl/KCmd/EOData/EICtl/EOCtl/PCtl/POData: TODO; break;
-//     default:  break;
-//   }
+// Dispatches a CP→peripheral write.  The target is selected by mi.fY
+// interpreted as a YIOOutFunction.
+//
+//   DCtlFifo  → DisplayController::SetDCtlFifo(aluOut)
+//   DCtl      → DisplayController::SetDCtl(aluOut)
+//   DBorder   → DisplayController::SetDBorder(aluOut)
+//   MCtl      → MemoryController::SetMCtl(aluOut)
+//   IOPOData  → _iopOutputData = aluOut
+//   IOPCtl    → _iopCtl = aluOut  (TODO: trigger RST7.5 on IOP)
+//   KOData/KCtl/KCmd       → TODO: keyboard subsystem (silently ignored)
+//   EOData/EICtl/EOCtl     → TODO: ethernet subsystem (silently ignored)
+//   PCtl/POData            → TODO: printer subsystem   (silently ignored)
+//   Invalid0/Invalid1      → silently ignored
 // ---------------------------------------------------------------------------
 
 void CpIo::ExecuteIOOut(const Microinstruction& mi,
                         TaskContext&            ctx,
                         uint16_t               aluOut)
 {
-    // TODO: implement per plan above.
-    (void)mi; (void)ctx; (void)aluOut;
+    (void)ctx;  // ctx is not written by IOOut operations
+
+    YIOOutFunction fn = static_cast<YIOOutFunction>(mi.fY);
+    switch (fn)
+    {
+        case YIOOutFunction::DCtlFifo:
+            if (_system && _system->GetDisplayController())
+                _system->GetDisplayController()->SetDCtlFifo(aluOut);
+            break;
+
+        case YIOOutFunction::DCtl:
+            if (_system && _system->GetDisplayController())
+                _system->GetDisplayController()->SetDCtl(aluOut);
+            break;
+
+        case YIOOutFunction::DBorder:
+            if (_system && _system->GetDisplayController())
+                _system->GetDisplayController()->SetDBorder(aluOut);
+            break;
+
+        case YIOOutFunction::MCtl:
+            if (_system && _system->GetMemoryController())
+                _system->GetMemoryController()->SetMCtl(aluOut);
+            break;
+
+        case YIOOutFunction::IOPOData:
+            _iopOutputData = aluOut;
+            break;
+
+        case YIOOutFunction::IOPCtl:
+            _iopCtl = aluOut;
+            // TODO: trigger RST7.5 interrupt on the IOP CPU.
+            break;
+
+        // Keyboard, ethernet, printer, and invalid function codes are
+        // silently ignored until those subsystems are implemented.
+        default:
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
