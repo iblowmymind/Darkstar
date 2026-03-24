@@ -57,6 +57,13 @@ uint16_t AM2901::Execute(int src, int func, int dest, int rAddr, int sAddr, uint
     _sign = (_f & 0x8000) != 0;
     _overflow = (((R_op ^ result) & (S_op ^ result) & 0x8000) != 0) ||
                 (func == 1 && (R_op & 0x8000) != (result & 0x8000)); // simplified
+    // Carry out of bit 8 (page carry) and bit 4 (nibble carry)
+    {
+        uint32_t r8  = (R_op & 0x1FF) + (S_op & 0x1FF) + (cin ? 1u : 0u);
+        uint32_t r4  = (R_op & 0x1F)  + (S_op & 0x1F)  + (cin ? 1u : 0u);
+        _pgCarry  = func <= 2 && (r8 >> 8) != 0;
+        _nibCarry = func <= 2 && (r4 >> 4) != 0;
+    }
 
     // Destination selection (I8..I6)
     _oe = _f;

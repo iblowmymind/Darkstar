@@ -29,6 +29,9 @@ public:
     bool Overflow()  const { return _overflow; }
     bool Zero()      const { return _zero; }
     bool Sign()      const { return _sign; }
+    bool Neg()       const { return _sign; }   // alias used by CP
+    bool PgCarry()   const { return _pgCarry; } // carry out of bit 8
+    bool NibCarry()  const { return _nibCarry; }// carry out of bit 4
 
     // Register file (16 x 16-bit)
     uint16_t R(int i) const { return _r[i & 0xF]; }
@@ -52,4 +55,6 @@ private:
     bool _overflow{false};
     bool _zero{false};
     bool _sign{false};
+    bool _pgCarry{false};
+    bool _nibCarry{false};
 };
