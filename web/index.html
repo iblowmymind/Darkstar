@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Darkstar – Xerox Star 8010 Emulator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Darkstar <span class="subtitle">Xerox Star 8010 Emulator</span></h1>
+  </header>
+
+  <div id="toolbar">
+    <button id="btn-start"  class="btn btn-primary">&#9654; Start</button>
+    <button id="btn-stop"   class="btn" disabled>&#9209; Stop</button>
+    <button id="btn-reset"  class="btn">&#8635; Reset</button>
+    <span class="sep"></span>
+    <label class="btn btn-file" title="Load a floppy disk image (.imd or raw)">
+      &#128190; Load Disk&hellip;
+      <input type="file" id="floppy-input" accept=".imd,.img,.dsk,.flp">
+    </label>
+    <button id="btn-eject" class="btn" disabled>&#9167; Eject</button>
+    <span class="sep"></span>
+    <span id="disk-label" class="info-label"></span>
+    <span class="sep grow"></span>
+    <span id="mp-code"  class="info-label monospace">MP: ----</span>
+    <span id="fps-counter" class="info-label monospace">0 fps</span>
+  </div>
+
+  <div id="screen-wrapper">
+    <canvas id="screen" width="1088" height="860" tabindex="0"
+            title="Click here then use keyboard and mouse"></canvas>
+    <div id="overlay-msg" class="overlay">
+      Press <strong>Start</strong> to begin emulation,<br>
+      then load a floppy disk image.
+    </div>
+  </div>
+
+  <footer>
+    <small>Ported from the
+      <a href="https://github.com/livingcomputermuseum/Darkstar" target="_blank">Living Computer Museum Darkstar</a>
+      project. BSD 2-Clause licence.
+    </small>
+  </footer>
+</div>
+
+<!-- Emscripten-generated module (built by make) -->
+<script src="darkstar.js"></script>
+<!-- UI glue layer -->
+<script src="darkstar-ui.js"></script>
+</body>
+</html>
