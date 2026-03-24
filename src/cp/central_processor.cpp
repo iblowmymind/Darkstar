@@ -106,13 +106,12 @@ TaskType CentralProcessor::SelectNextTask()
 // ---------------------------------------------------------------------------
 // Clock – execute one microcode click (~137 ns emulated time)
 //
-// Full 13-step execution plan (to be implemented in a future session):
 //  1.  _currentTask = SelectNextTask().
 //  2.  TaskContext& ctx = _ctx[static_cast<int>(_currentTask)].
 //  3.  Microinstruction mi = _controlStore.At(_currentTask, ctx.uPC).
 //  4.  X-bus mux: xBus = mi.AluNeedsXBus ? ctx.T : 0;
 //                 if (mi.fSfY==Byte || mi.fSfZ==Nibble) xBus = mi.Byte;
-//  5.  bool cin = mi.LoadCinFrompc16 ? ctx.cin16 : mi.Cin;
+//  5.  bool cin = (mi.fX==LoadCinFrompc16) ? ctx.cin16 : mi.Cin;
 //  6.  uint16_t aluOut = _alu.Execute(mi, ctx, xBus, cin).
 //  7.  if (mi.fSfZ==IOXIn) xBus = _io.ExecuteIOXIn(mi, ctx).
 //  8.  uint16_t mdWord = _mem.ExecuteMem(mi, ctx, _currentTask, aluOut).
@@ -126,10 +125,49 @@ TaskType CentralProcessor::SelectNextTask()
 
 void CentralProcessor::Clock()
 {
-    // TODO: implement full execution per plan above.
+    // Step 1: select the highest-priority awake task.
     _currentTask = SelectNextTask();
+
+    // Step 2: mutable context for this task.
     TaskContext& ctx = _ctx[static_cast<int>(_currentTask)];
-    ctx.uPC = (ctx.uPC + 1) & (CP_CS_SIZE - 1);
+
+    // Step 3: decode the microinstruction at the current uPC.
+    Microinstruction mi = _controlStore.At(_currentTask, ctx.uPC);
+
+    // Step 4: X-bus source mux.
+    //   Byte constant (fSfY==Byte or fSfZ==Nibble) takes priority over T.
+    uint16_t xBus = mi.AluNeedsXBus ? ctx.T : static_cast<uint16_t>(0);
+    if (mi.fSfY == FunctionSelectFY::Byte || mi.fSfZ == FunctionSelectFZ::Nibble)
+        xBus = static_cast<uint16_t>(mi.Byte);
+
+    // Step 5: resolve carry-in.
+    //   When fX==LoadCinFrompc16 this is the high half of a 32-bit operation;
+    //   use the carry saved from the previous 16-bit half.
+    bool cin = (mi.fX == XFunction::LoadCinFrompc16) ? ctx.cin16 : mi.Cin;
+
+    // Step 6: execute the ALU (AM2901 slices + SU + LoadRH).
+    uint16_t aluOut = _alu.Execute(mi, ctx, xBus, cin);
+
+    // Step 7: IOXIn – replace xBus with the peripheral read result.
+    if (mi.fSfZ == FunctionSelectFZ::IOXIn)
+        xBus = _io.ExecuteIOXIn(mi, ctx);
+
+    // Step 8: memory sequence (MAR← / MDR← / ←MD); returns MD word on click 3.
+    uint16_t mdWord = _mem.ExecuteMem(mi, ctx, _currentTask, aluOut);
+
+    // Steps 9-11: side-effect functions.
+    HandleXFunction(mi, ctx, aluOut);
+    HandleYFunction(mi, ctx, aluOut, mdWord);
+    HandleZFunction(mi, ctx, xBus);
+
+    // Step 12: late left-rotation of xBus (applies when LateLRotN is set).
+    xBus = _alu.ApplyLRot(mi, xBus);
+
+    // Step 13: compute next uPC via the NIA engine.
+    ctx.uPC = _nia.Compute(mi, ctx, _alu.Alu(), xBus, _io.MesaIntRq());
+
+    // Step 14: latch xBus into T for the next click.
+    ctx.T = xBus;
 }
 
 // ---------------------------------------------------------------------------
