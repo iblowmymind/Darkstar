@@ -86,6 +86,7 @@ EMCXXFLAGS := $(CXXFLAGS_COMMON) \
     -s MODULARIZE=1 \
     -s EXPORT_NAME=DarkstarModule \
     -s ENVIRONMENT=web \
+    --embed-file D/IOP/PROM@IOP/PROM \
     --no-entry
 
 comma := ,
