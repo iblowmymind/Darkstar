@@ -73,6 +73,9 @@ EM_EXPORTED_FUNCTIONS := \
     _darkstar_load_floppy \
     _darkstar_eject_floppy \
     _darkstar_get_mp_code \
+    _darkstar_get_iop_pc \
+    _darkstar_is_iop_halted \
+    _darkstar_get_instruction_count \
     _malloc \
     _free
 

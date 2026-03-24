@@ -59,6 +59,7 @@
   let rafHandle = null;
   let lastFpsTime = 0;
   let frameCount  = 0;
+  let lastDiagLog = 0; // timestamp of last diagnostic console.log
 
   // -------------------------------------------------------------------------
   // DOM helpers
@@ -83,6 +84,27 @@
   function updateMpCode() {
     const mp = ds._darkstar_get_mp_code ? ds._darkstar_get_mp_code() : 0;
     $('mp-code').textContent = 'MP: ' + mp.toString(16).toUpperCase().padStart(4, '0');
+  }
+
+  function updateDiagnostics() {
+    const pc      = ds._darkstar_get_iop_pc      ? ds._darkstar_get_iop_pc()            : null;
+    const halted  = ds._darkstar_is_iop_halted   ? ds._darkstar_is_iop_halted()         : null;
+    const icount  = ds._darkstar_get_instruction_count ? ds._darkstar_get_instruction_count() : null;
+
+    if (pc !== null) {
+      $('iop-pc').textContent = 'PC: ' + pc.toString(16).toUpperCase().padStart(4, '0');
+    }
+    if (halted !== null) {
+      const haltEl = $('iop-halt');
+      if (halted) {
+        haltEl.textContent = 'HALTED';
+        haltEl.style.color = '#e94560';
+      } else {
+        haltEl.textContent = '';
+        haltEl.style.color = '';
+      }
+    }
+    return { pc, halted, icount };
   }
 
   // -------------------------------------------------------------------------
@@ -121,6 +143,19 @@
     // Status
     updateFps(now);
     updateMpCode();
+    const diag = updateDiagnostics();
+
+    // Log diagnostics to browser console every 5 seconds to aid debugging
+    if (now - lastDiagLog >= 5000) {
+      const mp = ds._darkstar_get_mp_code ? ds._darkstar_get_mp_code() : 0;
+      console.log(
+        '[Darkstar] diag | PC: 0x' + (diag.pc !== null ? diag.pc.toString(16).toUpperCase().padStart(4, '0') : '????') +
+        ' | MP: 0x' + mp.toString(16).toUpperCase().padStart(4, '0') +
+        ' | halted: ' + (diag.halted ? 'YES' : 'no') +
+        ' | instructions: ' + (diag.icount !== null ? diag.icount : '?')
+      );
+      lastDiagLog = now;
+    }
 
     rafHandle = requestAnimationFrame(mainLoop);
   }
@@ -136,6 +171,7 @@
     $('overlay-msg').classList.add('hidden');
     lastFpsTime = performance.now();
     frameCount  = 0;
+    lastDiagLog = 0;
     rafHandle   = requestAnimationFrame(mainLoop);
   }
 

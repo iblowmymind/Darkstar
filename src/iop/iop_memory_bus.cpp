@@ -29,7 +29,7 @@
 #include "iop_memory_bus.h"
 #include "../types.h"
 #include <fstream>
-#include <iostream>
+#include <cstdio>
 
 IOPMemoryBus::IOPMemoryBus(I8085IOBus* ioBus) : _io(ioBus) {
     // Initialize ROM and RAM to zero
@@ -111,7 +111,7 @@ void IOPMemoryBus::LoadPROM(const std::string& promName, uint16_t address) {
     std::ifstream file(path, std::ios::binary);
 
     if (!file.is_open()) {
-        std::cerr << "Warning: Could not load PROM file: " << path << std::endl;
+        printf("[Darkstar] ERROR: Could not load PROM file: %s\n", path.c_str());
         // Fill with 0xFF as default
         for (uint16_t i = 0; i < 0x800 && (address + i) < 0x2000; i++) {
             _rom[address + i] = 0xFF;
@@ -132,6 +132,9 @@ void IOPMemoryBus::LoadPROM(const std::string& promName, uint16_t address) {
         _rom[address + offset] = 0xFF;
         offset++;
     }
+
+    printf("[Darkstar] Loaded PROM %s at 0x%04X (%u bytes)\n",
+           promName.c_str(), address, static_cast<unsigned>(offset));
 }
 
 void IOPMemoryBus::LoadHostIDProm() {

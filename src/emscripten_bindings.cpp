@@ -31,6 +31,7 @@
 static DSystem*     g_system    = nullptr;
 static IOProcessor* g_iop       = nullptr;
 static FloppyDisk*  g_floppy    = nullptr;   // currently loaded floppy image
+static uint64_t     g_instruction_count = 0; // total IOP instructions executed
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -41,6 +42,10 @@ EXPORT void darkstar_init() {
     if (g_system) return;
     g_system = new DSystem();
     g_iop    = new IOProcessor(g_system);
+    printf("[Darkstar] Emulator initialised. ROM[0]=0x%02X ROM[1]=0x%02X ROM[2]=0x%02X\n",
+           g_iop->Memory()->ReadByte(0),
+           g_iop->Memory()->ReadByte(1),
+           g_iop->Memory()->ReadByte(2));
 }
 
 /// Hard reset the emulator (keeps loaded disk image).
@@ -48,6 +53,7 @@ EXPORT void darkstar_reset() {
     if (!g_system) darkstar_init();
     g_iop->Reset();
     g_system->Reset();
+    g_instruction_count = 0;
 }
 
 /// Free all resources.
@@ -65,7 +71,9 @@ EXPORT void darkstar_destroy() {
 /// Returns the number of CPU cycles consumed.
 EXPORT int darkstar_step() {
     if (!g_iop) return 0;
-    return g_iop->Execute();
+    int cycles = g_iop->Execute();
+    g_instruction_count++;
+    return cycles;
 }
 
 /// Execute the emulator for approximately `nsec` nanoseconds of emulated time.
@@ -80,6 +88,7 @@ EXPORT int darkstar_run_nsec(uint32_t nsec) {
         g_iop->Execute();
         count++;
     }
+    g_instruction_count += static_cast<uint64_t>(count);
     return count;
 }
 
@@ -199,4 +208,25 @@ EXPORT int darkstar_display_on() {
     if (!g_system) return 0;
     DisplayController* dc = g_system->GetDisplayController();
     return (dc && dc->DisplayOn()) ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+/// Returns the current program counter of the IOP (i8085) CPU.
+EXPORT uint16_t darkstar_get_iop_pc() {
+    if (!g_iop) return 0;
+    return g_iop->CPU()->PC();
+}
+
+/// Returns 1 if the IOP (i8085) CPU is halted, 0 otherwise.
+EXPORT int darkstar_is_iop_halted() {
+    if (!g_iop) return 0;
+    return g_iop->CPU()->Halted() ? 1 : 0;
+}
+
+/// Returns the total number of IOP instructions executed since init/reset.
+EXPORT uint32_t darkstar_get_instruction_count() {
+    return static_cast<uint32_t>(g_instruction_count);
 }
