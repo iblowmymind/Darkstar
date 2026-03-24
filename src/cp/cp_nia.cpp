@@ -28,75 +28,89 @@
 
 #include "cp_nia.h"
 
-// ---------------------------------------------------------------------------
-// NiaEngine::Compute
-//
-// Implementation plan for a future session:
-//  1. Default: nextUPC = mi.INIA.
-//  2. pCallRet (mi.LinkAddress >= 0): push INIA onto callStack; next = LinkAddress.
-//  3. fSfY == DispBr && AlwaysIBDisp: next = (INIA & ~0xF) | (opcode >> 4).
-//  4. fSfY == DispBr, single-bit: if EvalDispBrCondition() → next = INIA | 1.
-//  5. fSfY == DispBr, multi-bit:  next = (INIA & ~0xF) | BuildDispatchOffset().
-//  6. SJump (fX==pop && pop-only): next = callStack[--stackPointer].
-//  7. Return next & (CP_CS_SIZE - 1).
-// ---------------------------------------------------------------------------
-
 int NiaEngine::Compute(const Microinstruction& mi,
                        TaskContext&            ctx,
                        const AM2901&           alu,
                        uint16_t                xBus,
                        bool                    mesaIntRq)
 {
-    // TODO: implement full NIA logic per plan above.
-    // Stub: sequential advance.
-    (void)mi; (void)alu; (void)xBus; (void)mesaIntRq;
-    return (ctx.uPC + 1) & (CP_CS_SIZE - 1);
-}
+    int nextUPC = mi.INIA;
 
-// ---------------------------------------------------------------------------
-// NiaEngine::EvalDispBrCondition
-//
-// Implementation plan:
-//   NegBr      → alu.Sign()
-//   ZeroBr     → alu.Zero()
-//   NZeroBr    → !alu.Zero()
-//   MesaIntBr  → mesaIntRq
-//   PgCarryBr  → alu.PgCarry()
-//   CarryBr    → alu.CarryOut()
-//   XRefBr     → (xBus & 1) != 0
-//   NibCarryBr → alu.NibCarry()
-// ---------------------------------------------------------------------------
+    // pCallRet: push return address (INIA) onto call stack, jump to LinkAddress.
+    if (mi.LinkAddress >= 0)
+    {
+        if (ctx.stackPointer < CP_CALL_STACK_DEPTH)
+            ctx.callStack[ctx.stackPointer++] = mi.INIA;
+        return mi.LinkAddress & (CP_CS_SIZE - 1);
+    }
+
+    // IBDisp: dispatch on the high nibble of the current IB byte.
+    if (mi.AlwaysIBDisp)
+    {
+        uint8_t opcode = ctx.ib[ctx.ibPtr & (CP_IB_SIZE - 1)];
+        return (mi.INIA & ~0xF) | ((opcode >> 4) & 0xF);
+    }
+
+    // DispBr: branch or multi-bit dispatch controlled by fY.
+    if (mi.fSfY == FunctionSelectFY::DispBr)
+    {
+        YDispBrFunction fn = static_cast<YDispBrFunction>(mi.fY);
+        if (fn <= YDispBrFunction::NibCarryBr)
+        {
+            // Single-bit branch: set bit 0 of INIA when condition is true.
+            if (EvalDispBrCondition(fn, alu, mesaIntRq, xBus))
+                nextUPC = mi.INIA | 1;
+        }
+        else
+        {
+            // Multi-bit dispatch: replace low 4 bits of INIA.
+            uint16_t yBus = alu.R(mi.rA);
+            nextUPC = (mi.INIA & ~0xF) | BuildDispatchOffset(fn, xBus, yBus, alu);
+        }
+        return nextUPC & (CP_CS_SIZE - 1);
+    }
+
+    // SJump: pop call stack and return to the saved address.
+    if (mi.Pop && !mi.Push && ctx.stackPointer > 0)
+        return ctx.callStack[--ctx.stackPointer] & (CP_CS_SIZE - 1);
+
+    return nextUPC & (CP_CS_SIZE - 1);
+}
 
 bool NiaEngine::EvalDispBrCondition(YDispBrFunction fn,
                                      const AM2901&   alu,
                                      bool            mesaIntRq,
                                      uint16_t        xBus) const
 {
-    // TODO: implement per plan above.
-    (void)fn; (void)alu; (void)mesaIntRq; (void)xBus;
-    return false;
+    switch (fn)
+    {
+        case YDispBrFunction::NegBr:      return alu.Sign();
+        case YDispBrFunction::ZeroBr:     return alu.Zero();
+        case YDispBrFunction::NZeroBr:    return !alu.Zero();
+        case YDispBrFunction::MesaIntBr:  return mesaIntRq;
+        case YDispBrFunction::PgCarryBr:  return alu.PgCarry();
+        case YDispBrFunction::CarryBr:    return alu.CarryOut();
+        case YDispBrFunction::XRefBr:     return (xBus & 1) != 0;
+        case YDispBrFunction::NibCarryBr: return alu.NibCarry();
+        default:                          return false;
+    }
 }
-
-// ---------------------------------------------------------------------------
-// NiaEngine::BuildDispatchOffset
-//
-// Implementation plan:
-//   XDisp      → xBus & 0xF
-//   YDisp      → yBus & 0xF
-//   XC2npcDisp → (xBus >> 2) & 0x3
-//   YIODisp    → xBus & 0xF
-//   XwdDisp    → xBus & 0x3
-//   XHDisp     → (xBus >> 12) & 0xF
-//   XLDisp     → (xBus >> 8)  & 0xF
-//   PgCrOvDisp → (alu.PgCarry() ? 2 : 0) | (alu.Overflow() ? 1 : 0)
-// ---------------------------------------------------------------------------
 
 int NiaEngine::BuildDispatchOffset(YDispBrFunction fn,
                                     uint16_t        xBus,
                                     uint16_t        yBus,
                                     const AM2901&   alu) const
 {
-    // TODO: implement per plan above.
-    (void)fn; (void)xBus; (void)yBus; (void)alu;
-    return 0;
+    switch (fn)
+    {
+        case YDispBrFunction::XDisp:      return  xBus        & 0xF;
+        case YDispBrFunction::YDisp:      return  yBus        & 0xF;
+        case YDispBrFunction::XC2npcDisp: return (xBus >> 2)  & 0x3;
+        case YDispBrFunction::YIODisp:    return  xBus        & 0xF;
+        case YDispBrFunction::XwdDisp:    return  xBus        & 0x3;
+        case YDispBrFunction::XHDisp:     return (xBus >> 12) & 0xF;
+        case YDispBrFunction::XLDisp:     return (xBus >> 8)  & 0xF;
+        case YDispBrFunction::PgCrOvDisp: return (alu.PgCarry() ? 2 : 0) | (alu.Overflow() ? 1 : 0);
+        default:                          return 0;
+    }
 }
