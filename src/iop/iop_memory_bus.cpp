@@ -95,33 +95,40 @@ void IOPMemoryBus::WriteWord(uint16_t address, uint16_t w) {
 }
 
 void IOPMemoryBus::LoadPROMs() {
-    LoadPROM("CP.PROM", 0x0000);
-    LoadPROM("IOPM.PROM", 0x1000);
+    // Rev 3.1 PROM layout (matches the original C# implementation):
+    //   U129 - 537P03029.bin - $0000
+    //   U130 - 537P03030.bin - $0800
+    //   U131 - 537P03700.bin - $1000
+    //   U132 - 537P03032.bin - $1800
+    LoadPROM("537P03029.bin", 0x0000);
+    LoadPROM("537P03030.bin", 0x0800);
+    LoadPROM("537P03700.bin", 0x1000);
+    LoadPROM("537P03032.bin", 0x1800);
 }
 
 void IOPMemoryBus::LoadPROM(const std::string& promName, uint16_t address) {
     std::string path = "IOP/PROM/" + promName;
     std::ifstream file(path, std::ios::binary);
-    
+
     if (!file.is_open()) {
         std::cerr << "Warning: Could not load PROM file: " << path << std::endl;
         // Fill with 0xFF as default
-        for (uint16_t i = 0; i < 0x1000 && (address + i) < 0x2000; i++) {
+        for (uint16_t i = 0; i < 0x800 && (address + i) < 0x2000; i++) {
             _rom[address + i] = 0xFF;
         }
         return;
     }
-    
-    // Read PROM data
+
+    // Read PROM data (each PROM is exactly 0x800 bytes)
     char byte;
     uint16_t offset = 0;
-    while (file.get(byte) && offset < 0x1000 && (address + offset) < 0x2000) {
+    while (file.get(byte) && offset < 0x800 && (address + offset) < 0x2000) {
         _rom[address + offset] = static_cast<uint8_t>(byte);
         offset++;
     }
-    
+
     // Fill remainder with 0xFF if file was shorter than expected
-    while (offset < 0x1000 && (address + offset) < 0x2000) {
+    while (offset < 0x800 && (address + offset) < 0x2000) {
         _rom[address + offset] = 0xFF;
         offset++;
     }
