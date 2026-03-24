@@ -26,6 +26,11 @@ COMMON_SRCS := \
     $(SRC_DIR)/scheduler.cpp \
     $(SRC_DIR)/cp/am2901.cpp \
     $(SRC_DIR)/cp/central_processor.cpp \
+    $(SRC_DIR)/cp/control_store.cpp \
+    $(SRC_DIR)/cp/cp_alu.cpp \
+    $(SRC_DIR)/cp/cp_io.cpp \
+    $(SRC_DIR)/cp/cp_mem.cpp \
+    $(SRC_DIR)/cp/cp_nia.cpp \
     $(SRC_DIR)/io/floppy_disk.cpp \
     $(SRC_DIR)/io/sa1000.cpp \
     $(SRC_DIR)/io/shugart_controller.cpp \
