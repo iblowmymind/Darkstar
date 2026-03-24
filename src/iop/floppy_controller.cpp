@@ -304,7 +304,7 @@ void FloppyController::FinishWriteTrack() {
         int sectorCount = _trackBuffer.size() / sectorSize;
         if (sectorCount > 10) sectorCount = 10; // Limit to reasonable number
         
-        _drive->Disk->FormatTrack(Format::FM500, _track, 0, sectorCount, sectorSize);
+        _drive->Disk->FormatTrack(static_cast<int>(Format::FM500), _track, 0, sectorCount, sectorSize);
         _drive->Disk->SetModified();
     }
 }

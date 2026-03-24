@@ -33,6 +33,12 @@ public:
 
     void GetImageData(std::vector<uint8_t>& out) const;
 
+    // Mark the image as modified (called after write operations).
+    void SetModified() { _modified = true; }
+
+    // Format a track (stub – geometric metadata only; content is written via WriteSector).
+    void FormatTrack(int /*format*/, int /*cylinder*/, int /*head*/, int /*sectorCount*/, int /*sectorSize*/) {}
+
 private:
     bool ParseIMD(const std::vector<uint8_t>& data);
 
