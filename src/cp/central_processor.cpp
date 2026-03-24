@@ -134,21 +134,66 @@ void CentralProcessor::Clock()
 // ---------------------------------------------------------------------------
 // HandleXFunction
 //
-// Implementation plan for a future session:
-//   pCallRet0..7: push INIA onto callStack; jump to LinkAddress.
-//   pop:          pop callStack (set StackUnderflow on empty stack).
-//   push:         push uPC (set StackOverflow on full stack).
-//   LoadCinFrompc16: ctx.cin16 = (aluOut >> 15) & 1.
-//   LoadMap:      _mem.LoadMap(mi.rB, aluOut).
-//   LoadRH/shift/cycle/Noop: handled elsewhere or noop.
+// Handles the fX-encoded operations that are not covered by the NIA engine
+// or CpAlu:
+//
+//   pCallRet0..7 – NiaEngine pushes INIA and returns LinkAddress.
+//                  HandleXFunction only checks for stack overflow.
+//   pop          – NiaEngine pops and returns the saved address (SJump).
+//                  HandleXFunction only checks for stack underflow.
+//   push         – Push ctx.uPC as a return address; check stack overflow.
+//   LoadCinFrompc16 – ctx.cin16 = (aluOut >> 15) & 1.
+//   LoadMap      – _mem.LoadMap(mi.rB, aluOut). Also triggered by fY==LoadMap.
+//   LoadRH / shift / cycle / Noop – handled by CpAlu or are no-ops here.
 // ---------------------------------------------------------------------------
 
 void CentralProcessor::HandleXFunction(const Microinstruction& mi,
                                         TaskContext&            ctx,
                                         uint16_t               aluOut)
 {
-    // TODO: implement per plan above.
-    (void)mi; (void)ctx; (void)aluOut;
+    // pCallRet0..7: NIA engine handles the push and jump.
+    // Set StackOverflow if the stack was full at that point.
+    if (mi.LinkAddress >= 0)
+    {
+        if (ctx.stackPointer >= CP_CALL_STACK_DEPTH)
+            ctx.errorFlags |= static_cast<uint8_t>(
+                1 << static_cast<int>(ErrorTrap::StackOverflow));
+    }
+    else
+    {
+        switch (mi.fX)
+        {
+            case XFunction::pop:
+                // SJump: NIA engine pops and returns the saved address.
+                // Just set StackUnderflow if the stack is empty.
+                if (ctx.stackPointer == 0)
+                    ctx.errorFlags |= static_cast<uint8_t>(
+                        1 << static_cast<int>(ErrorTrap::StackUnderflow));
+                break;
+
+            case XFunction::push:
+                // Save the current uPC as a return address.
+                if (ctx.stackPointer >= CP_CALL_STACK_DEPTH)
+                    ctx.errorFlags |= static_cast<uint8_t>(
+                        1 << static_cast<int>(ErrorTrap::StackOverflow));
+                else
+                    ctx.callStack[ctx.stackPointer++] = ctx.uPC;
+                break;
+
+            case XFunction::LoadCinFrompc16:
+                ctx.cin16 = ((aluOut >> 15) & 1) != 0;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    // LoadMap is asserted by fX == LoadMap or fY == LoadMap (mi.LoadMap
+    // aggregates both sources).  Check it independently of the pCallRet path
+    // because fY == LoadMap can co-occur with fX == pCallRet.
+    if (mi.LoadMap)
+        _mem.LoadMap(mi.rB, aluOut);
 }
 
 // ---------------------------------------------------------------------------
