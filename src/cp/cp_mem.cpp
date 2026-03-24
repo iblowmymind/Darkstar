@@ -47,19 +47,12 @@ void CpMemInterface::Reset()
 // ---------------------------------------------------------------------------
 // CpMemInterface::ExecuteMem
 //
-// Implementation plan for a future session:
-//   if (!mi.MarMapMDR) { _memClick = 0; return 0; }
-//   ++_memClick;
-//   switch (_memClick) {
-//     case 1: _system->GetMemoryController()->LoadMAR(Translate(aluOut)); return 0;
-//     case 2: _system->GetMemoryController()->LoadMDR(aluOut); return 0;
-//     case 3: _memClick = 0;
-//             bool valid;
-//             uint16_t w = _system->GetMemoryController()->ReadMD(task, valid);
-//             if (!valid) ctx.errorFlags |= (1<<(int)ErrorTrap::EmulatorMemoryError);
-//             return w;
-//   }
-//   return 0;
+// Executes one click of the three-click MAR/MDR/MD memory sequence:
+//   Click 1 – MAR← : translate address and call LoadMAR().
+//   Click 2 – MDR← : write data via LoadMDR(aluOut).
+//   Click 3 – ←MD  : return the word from ReadMD(); set
+//                     ErrorTrap::EmulatorMemoryError on an ECC fault.
+// If mi.MarMapMDR is false the sequence is reset and 0 is returned.
 // ---------------------------------------------------------------------------
 
 uint16_t CpMemInterface::ExecuteMem(const Microinstruction& mi,
@@ -67,9 +60,42 @@ uint16_t CpMemInterface::ExecuteMem(const Microinstruction& mi,
                                      TaskType                task,
                                      uint16_t               aluOut)
 {
-    // TODO: implement per plan above.
-    (void)mi; (void)ctx; (void)task; (void)aluOut;
-    return 0;
+    if (!mi.MarMapMDR)
+    {
+        _memClick = 0;
+        return 0;
+    }
+
+    ++_memClick;
+
+    switch (_memClick)
+    {
+        case 1:
+            if (_system)
+                _system->GetMemoryController()->LoadMAR(Translate(aluOut));
+            return 0;
+
+        case 2:
+            if (_system)
+                _system->GetMemoryController()->LoadMDR(aluOut);
+            return 0;
+
+        case 3:
+        {
+            _memClick = 0;
+            if (!_system)
+                return 0;
+            bool valid = false;
+            uint16_t w = _system->GetMemoryController()->ReadMD(task, valid);
+            if (!valid)
+                ctx.errorFlags |= static_cast<uint8_t>(1 << static_cast<int>(ErrorTrap::EmulatorMemoryError));
+            return w;
+        }
+
+        default:
+            _memClick = 0;
+            return 0;
+    }
 }
 
 void CpMemInterface::LoadMap(int mapIndex, uint16_t value)
