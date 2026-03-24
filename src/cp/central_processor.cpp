@@ -27,6 +27,7 @@
 */
 
 #include "central_processor.h"
+#include "../dsystem.h"
 #include <cstring>
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,7 @@ TaskType CentralProcessor::SelectNextTask()
 //  7.  if (mi.fSfZ==IOXIn) xBus = _io.ExecuteIOXIn(mi, ctx).
 //  8.  uint16_t mdWord = _mem.ExecuteMem(mi, ctx, _currentTask, aluOut).
 //  9.  HandleXFunction(mi, ctx, aluOut).
-// 10.  HandleYFunction(mi, ctx, aluOut).
+// 10.  HandleYFunction(mi, ctx, aluOut, mdWord).
 // 11.  HandleZFunction(mi, ctx, xBus).
 // 12.  xBus = _alu.ApplyLRot(mi, xBus).
 // 13.  ctx.uPC = _nia.Compute(mi, ctx, _alu.Alu(), xBus, _io.MesaIntRq()).
@@ -199,58 +200,173 @@ void CentralProcessor::HandleXFunction(const Microinstruction& mi,
 // ---------------------------------------------------------------------------
 // HandleYFunction
 //
-// Implementation plan for a future session:
-//   fyNorm → YNormFunction:
+// Dispatches the fSfY-encoded function for the current click.
+//
+//   IOOut  → _io.ExecuteIOOut(mi, ctx, aluOut).
+//   Byte   → constant already on xBus from mux; noop here.
+//   DispBr → branch is computed in NiaEngine; noop here.
+//   fyNorm → dispatch on YNormFunction (mi.fY):
 //     ExitKern:    _mem.SetKernelMode(false); _mem.SetMarpEnable(true).
 //     EnterKern:   _mem.SetKernelMode(true);  _mem.SetMarpEnable(true).
 //     ClrIntErr:   _io.SetMesaIntRq(false).
 //     MesaIntRq:   _io.SetMesaIntRq(true).
 //     LoadstackP:  ctx.stackPointer = aluOut & (CP_CALL_STACK_DEPTH-1).
-//     LoadIB:      fetch IB bytes from memory, set ibState.
+//     LoadIB:      fill IB from mdWord (memory-fetch result); update ibState.
 //     ClrDPRq:     _system->GetDisplayController()->ClrDpRq().
 //     ClrIOPRq:    SleepTask(TaskType::IOP).
 //     ClrRefRq:    SleepTask(TaskType::Refresh).
-//     Refresh/LoadMap/push/cycle/Noop: handled elsewhere or noop.
-//   DispBr → side-effects only; branch computed in NiaEngine.
-//   IOOut  → _io.ExecuteIOOut(mi, ctx, aluOut).
-//   Byte   → constant already on xBus from mux; noop here.
+//     ClrKFlags:   ctx.errorFlags = 0.
+//     IBDisp/cycle/LoadMap/push/Refresh/Noop: handled elsewhere or noop.
 // ---------------------------------------------------------------------------
 
 void CentralProcessor::HandleYFunction(const Microinstruction& mi,
                                         TaskContext&            ctx,
-                                        uint16_t               aluOut)
+                                        uint16_t               aluOut,
+                                        uint16_t               mdWord)
 {
     if (mi.fSfY == FunctionSelectFY::IOOut)
     {
         _io.ExecuteIOOut(mi, ctx, aluOut);
         return;
     }
-    // TODO: implement remaining cases per plan above.
-    (void)mi; (void)ctx; (void)aluOut;
+
+    // Byte: constant is already on xBus from the mux; no side effects here.
+    // DispBr: branch is computed in NiaEngine; no side effects here.
+    if (mi.fSfY != FunctionSelectFY::fyNorm)
+        return;
+
+    switch (static_cast<YNormFunction>(mi.fY))
+    {
+        case YNormFunction::ExitKern:
+            _mem.SetKernelMode(false);
+            _mem.SetMarpEnable(true);
+            break;
+
+        case YNormFunction::EnterKern:
+            _mem.SetKernelMode(true);
+            _mem.SetMarpEnable(true);
+            break;
+
+        case YNormFunction::ClrIntErr:
+            _io.SetMesaIntRq(false);
+            break;
+
+        case YNormFunction::MesaIntRq:
+            _io.SetMesaIntRq(true);
+            break;
+
+        case YNormFunction::LoadstackP:
+            ctx.stackPointer = aluOut & (CP_CALL_STACK_DEPTH - 1);
+            break;
+
+        case YNormFunction::LoadIB:
+        {
+            // Load the memory-fetch word into the IB.
+            // Fill the first slot (ib[0..1]) if the IB is not yet Full,
+            // otherwise fill the second slot (ib[2..3]).
+            if (ctx.ibState < IBState::Full)
+            {
+                ctx.ib[0]   = static_cast<uint8_t>(mdWord >> 8);
+                ctx.ib[1]   = static_cast<uint8_t>(mdWord & 0xFF);
+                ctx.ibPtr   = 0;
+                ctx.ibState = IBState::Full;
+            }
+            else
+            {
+                ctx.ib[2]   = static_cast<uint8_t>(mdWord >> 8);
+                ctx.ib[3]   = static_cast<uint8_t>(mdWord & 0xFF);
+                ctx.ibState = IBState::Word;
+            }
+            break;
+        }
+
+        case YNormFunction::ClrDPRq:
+            if (_system && _system->GetDisplayController())
+                _system->GetDisplayController()->ClrDpRq();
+            break;
+
+        case YNormFunction::ClrIOPRq:
+            SleepTask(TaskType::IOP);
+            break;
+
+        case YNormFunction::ClrRefRq:
+            SleepTask(TaskType::Refresh);
+            break;
+
+        case YNormFunction::ClrKFlags:
+            ctx.errorFlags = 0;
+            break;
+
+        // IBDisp: dispatch is handled by NiaEngine (AlwaysIBDisp); noop here.
+        // cycle:  handled by CpAlu; noop here.
+        // LoadMap: handled by HandleXFunction; noop here.
+        // push:   handled by HandleXFunction; noop here.
+        // Refresh / Noop: noop.
+        default:
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // HandleZFunction
 //
-// Implementation plan for a future session:
-//   fzNorm → ZNormFunction:
+// Dispatches the fSfZ-encoded function for the current click.
+//
+//   Uaddr  → ctx.uPC = mi.UAddress (direct uPC load from the UAddress field).
+//   Nibble → constant already on xBus from mux; noop here.
+//   IOXIn  → handled earlier in the clock cycle; noop here.
+//   fzNorm → dispatch on ZNormFunction (mi.fZ):
 //     LoadIBPtr1:      ctx.ibPtr = 1.
 //     LoadIBPtr0:      ctx.ibPtr = 0.
 //     LoadCinFrompc16: ctx.cin16 = (xBus >> 15) & 1.
-//     LoadBank:        set address-map bank bits.
+//     LoadBank:        noop (bank switching not yet specified).
 //     AltUaddr:        ctx.uPC = mi.UAddress.
-//     pop/push:        handled cooperatively with HandleXFunction.
+//     pop/push:        handled cooperatively with HandleXFunction; noop here.
 //     LRot0/4/8/12:    handled in CpAlu::ApplyLRot; noop here.
 //     Refresh/Noop0..3: noop.
-//   Nibble → xBus = mi.Byte (already set in mux; noop here).
-//   Uaddr  → ctx.uPC = mi.UAddress.
-//   IOXIn  → handled earlier; noop here.
 // ---------------------------------------------------------------------------
 
 void CentralProcessor::HandleZFunction(const Microinstruction& mi,
                                         TaskContext&            ctx,
                                         uint16_t&              xBus)
 {
-    // TODO: implement per plan above.
-    (void)mi; (void)ctx; (void)xBus;
+    // Uaddr: direct uPC load from the combined (rA<<4)|fZ address field.
+    if (mi.fSfZ == FunctionSelectFZ::Uaddr)
+    {
+        ctx.uPC = mi.UAddress & (CP_CS_SIZE - 1);
+        return;
+    }
+
+    // Nibble: constant is already on xBus from the mux; noop here.
+    // IOXIn:  handled earlier in the clock cycle; noop here.
+    if (mi.fSfZ != FunctionSelectFZ::fzNorm)
+        return;
+
+    switch (static_cast<ZNormFunction>(mi.fZ))
+    {
+        case ZNormFunction::LoadIBPtr1:
+            ctx.ibPtr = 1;
+            break;
+
+        case ZNormFunction::LoadIBPtr0:
+            ctx.ibPtr = 0;
+            break;
+
+        case ZNormFunction::LoadCinFrompc16:
+            ctx.cin16 = ((xBus >> 15) & 1) != 0;
+            break;
+
+        case ZNormFunction::AltUaddr:
+            ctx.uPC = mi.UAddress & (CP_CS_SIZE - 1);
+            break;
+
+        // LoadBank: bank switching is not yet specified; noop.
+        // pop/push: handled cooperatively with HandleXFunction.
+        // LRot0/4/8/12: handled in CpAlu::ApplyLRot; noop here.
+        // Refresh / Noop0..3: noop.
+        default:
+            break;
+    }
+
+    (void)xBus;  // xBus is an in/out; no Z-function modifies it directly here.
 }

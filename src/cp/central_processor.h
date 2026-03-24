@@ -110,7 +110,7 @@ private:
     TaskType SelectNextTask();
 
     void HandleXFunction(const Microinstruction& mi, TaskContext& ctx, uint16_t aluOut);
-    void HandleYFunction(const Microinstruction& mi, TaskContext& ctx, uint16_t aluOut);
+    void HandleYFunction(const Microinstruction& mi, TaskContext& ctx, uint16_t aluOut, uint16_t mdWord);
     void HandleZFunction(const Microinstruction& mi, TaskContext& ctx, uint16_t& xBus);
 
     ControlStore   _controlStore;
