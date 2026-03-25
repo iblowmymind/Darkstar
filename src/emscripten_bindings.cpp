@@ -24,6 +24,7 @@
 #include "iop/mouse.h"
 #include "iop/floppy_drive.h"
 #include "io/floppy_disk.h"
+#include "cp/central_processor.h"
 
 // ---------------------------------------------------------------------------
 // Global emulator state
@@ -32,6 +33,14 @@ static DSystem*     g_system    = nullptr;
 static IOProcessor* g_iop       = nullptr;
 static FloppyDisk*  g_floppy    = nullptr;   // currently loaded floppy image
 static uint64_t     g_instruction_count = 0; // total IOP instructions executed
+
+// Ratio of CP clicks per 8085 clock cycle.
+// CP runs at ~7.3 MHz (137 ns/click); i8085 runs at ~3 MHz (333 ns/cycle).
+// Matches C# System.cs: _cpCyclesPer8085Cycle = 2.43 * 2.0 = 4.86
+static constexpr double CP_CLICKS_PER_8085_CYCLE = 4.86;
+
+// Accumulated fractional CP clicks (to avoid integer truncation drift).
+static double g_cpClickAccum = 0.0;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -54,6 +63,7 @@ EXPORT void darkstar_reset() {
     g_iop->Reset();
     g_system->Reset();
     g_instruction_count = 0;
+    g_cpClickAccum = 0.0;
 }
 
 /// Free all resources.
@@ -63,15 +73,28 @@ EXPORT void darkstar_destroy() {
     delete g_floppy; g_floppy = nullptr;
 }
 
+// Helper: run the CP for the correct number of clicks proportional to i8085Cycles.
+static inline void StepCP(int i8085Cycles)
+{
+    CentralProcessor* cp = g_system ? g_system->GetCP() : nullptr;
+    if (!cp) return;
+    g_cpClickAccum += CP_CLICKS_PER_8085_CYCLE * i8085Cycles;
+    int clicks = static_cast<int>(g_cpClickAccum);
+    g_cpClickAccum -= clicks;
+    for (int i = 0; i < clicks; i++)
+        cp->Clock();
+}
+
 // ---------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Execute a single IOP instruction (and any scheduled events that fall due).
-/// Returns the number of CPU cycles consumed.
+/// Execute a single IOP instruction and the corresponding CP clicks.
+/// Returns the number of IOP CPU cycles consumed.
 EXPORT int darkstar_step() {
     if (!g_iop) return 0;
     int cycles = g_iop->Execute();
+    StepCP(cycles);
     g_instruction_count++;
     return cycles;
 }
@@ -81,11 +104,11 @@ EXPORT int darkstar_step() {
 EXPORT int darkstar_run_nsec(uint32_t nsec) {
     if (!g_iop || !g_system) return 0;
     int count = 0;
-    Scheduler* sched = g_system->GetScheduler();
-    // Rough: assume ~500 ns per IOP instruction (i8085 @ 2 MHz)
-    int target = (int)(nsec / 500) + 1;
+    // Rough: assume ~333 ns per IOP instruction (i8085 @ 3 MHz)
+    int target = (int)(nsec / 333) + 1;
     for (int i = 0; i < target; i++) {
-        g_iop->Execute();
+        int cycles = g_iop->Execute();
+        StepCP(cycles);
         count++;
     }
     g_instruction_count += static_cast<uint64_t>(count);

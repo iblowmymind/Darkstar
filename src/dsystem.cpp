@@ -48,6 +48,7 @@ DSystem::~DSystem()
 void DSystem::Reset()
 {
     _scheduler->Reset();
+    _cp->Reset();
     _memoryController->Reset();
     _displayController->Reset();
 }
