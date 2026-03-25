@@ -27,9 +27,7 @@
 */
 
 #include "misc_io.h"
-
-// Forward declaration to resolve circular dependency
-class IOProcessor;
+#include "io_processor.h"
 
 // Clock control flags
 enum ClockFlags {
@@ -65,8 +63,8 @@ MiscIO::MiscIO(IOProcessor* iop) : _iop(iop) {
 void MiscIO::Reset() {
     _mPanelBlank = true;
     _mPanelValue = 0;
-    _altBootCounter = 0;
     _altBoot = AltBootValues::None;
+    _altBootCounter = static_cast<int>(_altBoot);
     _lastClockFlags = 0;
     _dmaTestValue = 0;
     _todClock.Reset();
@@ -74,9 +72,7 @@ void MiscIO::Reset() {
 
 void MiscIO::SetAltBoot(AltBootValues v) {
     _altBoot = v;
-    if (v != AltBootValues::None) {
-        _altBootCounter = 6; // Set counter for AltBoot detection
-    }
+    _altBootCounter = static_cast<int>(v);  // matches C#: _altBootCounter = (int)value
 }
 
 const std::vector<int>& MiscIO::ReadPorts() const {
@@ -90,36 +86,61 @@ const std::vector<int>& MiscIO::WritePorts() const {
 void MiscIO::WritePort(int port, uint8_t value) {
     switch (port) {
     case 0x8d:
-        // Beeper period (need access to beeper - will be handled by IOProcessor)
+        // i8253 Timer channel #1 – keyboard bell frequency (16-bit, LSB first)
+        _iop->GetBeeper()->LoadPeriod(value);
         break;
         
     case 0x8f:
-        // Timer mode - ignored
+        // i8253 Timer mode – ignored (no need to emulate the 8253 timer directly)
         break;
         
     case 0xd0:
-        // DMA test register
         _dmaTestValue = value;
         break;
         
     case 0xe9:
-        // Misc clock
         DoMiscClock(value);
         break;
         
     case 0xea:
-        // Clear TOD interrupt
         _todClock.ClearInterrupt();
         break;
         
     case 0xed:
-        // Mouse clear (need access to mouse - will be handled by IOProcessor)
+        _iop->GetMouse()->Clear();
         break;
         
     case 0xef:
-        // Various control bits
-        // Bit 0: beeper enable/disable
-        // Other bits: various controls
+        // Control bits:
+        // 0x40 - pReadKBData  – advance keyboard queue to next byte
+        // 0x20 - KBTone       – enable/disable keyboard speaker
+        // 0x10 - KBDiag       – enter keyboard diagnostic mode
+        // 0x08 - BlankMPanel  – blank the MP display
+        // 0x04 - ReadTimeMode – set TOD to Read mode
+        // 0x02 - ClearTimeMode – set TOD to Clear mode
+        // 0x01 - SetTimeMode  – set TOD to Set mode
+        _mPanelBlank = (value & 0x08) != 0;
+        if (MPChanged) MPChanged();
+
+        if ((value & 0x40) != 0)
+            _iop->GetKeyboard()->NextData();
+
+        if ((value & 0x20) != 0)
+            _iop->GetBeeper()->EnableTone();
+        else
+            _iop->GetBeeper()->DisableTone();
+
+        if ((value & 0x10) != 0)
+            _iop->GetKeyboard()->EnableDiagnosticMode();
+
+        if ((value & 0x04) != 0)
+            _todClock.SetMode(TODAccessMode::Read);
+
+        if ((value & 0x02) != 0)
+            _todClock.SetMode(TODAccessMode::Clear);
+
+        if ((value & 0x01) != 0)
+            _todClock.SetMode(TODAccessMode::Set);
         break;
     }
 }
@@ -127,67 +148,42 @@ void MiscIO::WritePort(int port, uint8_t value) {
 uint8_t MiscIO::ReadPort(int port) {
     switch (port) {
     case 0xd0:
-        // DMA test register
         return _dmaTestValue;
         
     case 0xe9:
-        // MiscInput0 (floppy interrupt, keyboard data ready)
-        // Bit 7: floppy interrupt (inverted)
-        // Bit 6: keyboard data ready (inverted)
-        {
-            uint8_t result = 0xFF;
-            // TODO: Get floppy interrupt status
-            // TODO: Get keyboard data ready status
-            return result;
-        }
+        // MiscInput0 – interrupt status flags, all active-low.
+        return static_cast<uint8_t>(~(
+            (_iop->GetFloppyController()->Interrupt() ? 0x80 : 0x00) |
+            (_iop->GetKeyboard()->DataReady()         ? 0x40 : 0x00)));
         
     case 0xea:
-        // Keyboard data
-        // TODO: Get keyboard read data
-        return 0;
+        // Keyboard data latch – data is inverted.
+        return static_cast<uint8_t>(~_iop->GetKeyboard()->ReadData());
         
     case 0xed:
-        // Mouse X coordinate
-        // TODO: Get mouse X
-        return 0;
+        return static_cast<uint8_t>(_iop->GetMouse()->MouseX());
         
     case 0xee:
-        // Mouse Y coordinate  
-        // TODO: Get mouse Y
-        return 0;
+        return static_cast<uint8_t>(_iop->GetMouse()->MouseY());
         
     case 0xef:
-        // MiscInput1
         {
+            // MiscInput1: AltBoot, TimeData, PowerFailed, TODInt, CSParError, MouseSw1-3
             uint8_t result = 0;
-            
-            // Handle AltBoot detection
+
+            // AltBoot: set while counter > 0, then decrement
             if (_altBootCounter > 0) {
+                result = static_cast<uint8_t>(AltBootFlag);
                 _altBootCounter--;
-                if (_altBootCounter == 0) {
-                    result |= AltBootFlag;
-                }
             }
-            
-            // TOD clock data bit
-            result |= _todClock.ReadClockBit();
-            
-            // Power failed (always cleared)
-            if (_todClock.PowerLoss()) {
-                result |= PowerFailed;
-            }
-            
-            // TOD interrupt
-            if (_todClock.Interrupt()) {
-                result |= TODInt;
-            }
-            
-            // CS Parity (active low, always set for now)
-            result |= CSParity;
-            
-            // Mouse button states
-            // TODO: Get mouse button states
-            
+
+            result = static_cast<uint8_t>(result |
+                static_cast<uint8_t>(_todClock.ReadClockBit())               |
+                (_todClock.PowerLoss()   ? static_cast<uint8_t>(PowerFailed) : 0) |
+                (_todClock.Interrupt()   ? static_cast<uint8_t>(TODInt)      : 0) |
+                static_cast<uint8_t>(_iop->GetMouse()->Buttons())            |
+                static_cast<uint8_t>(CSParity)  /* active-low, keep set (no parity errors) */);
+
             return result;
         }
     }
@@ -196,21 +192,17 @@ uint8_t MiscIO::ReadPort(int port) {
 }
 
 void MiscIO::DoMiscClock(uint8_t clockFlags) {
-    // Check for 1->0 transitions on each bit
-    for (int bit = 0; bit < 8; bit++) {
-        int mask = 1 << bit;
-        if ((_lastClockFlags & mask) && !(clockFlags & mask)) {
-            // 1->0 transition detected on this bit
-            switch (mask) {
+    // On a 1→0 transition for each clock bit, take the corresponding action.
+    for (int clockFlag = 0x1; clockFlag < 0x100; clockFlag <<= 1) {
+        if ((clockFlags & clockFlag) == 0 && (_lastClockFlags & clockFlag) != 0) {
+            switch (clockFlag) {
             case ClrMPanel:
-                _mPanelBlank = true;
                 _mPanelValue = 0;
                 if (MPChanged) MPChanged();
                 break;
                 
             case IncMPanel:
-                _mPanelBlank = false;
-                _mPanelValue = (_mPanelValue + 1) & 0xFF;
+                _mPanelValue = (_mPanelValue + 1) % 10000;
                 if (MPChanged) MPChanged();
                 break;
                 

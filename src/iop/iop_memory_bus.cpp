@@ -145,26 +145,42 @@ void IOPMemoryBus::UpdateHostIDProm() {
     // Set initial values to 0xFF
     _hostIdProm.fill(0xFF);
     
-    // Use Configuration::HostID if available
+    // The Host ID PROM stores the 48-bit Ethernet address as 12 nibble pairs
+    // (16 bytes total), followed by a checksum in byte 6 and its complement
+    // in byte 7.  Each "byte" occupies two PROM locations: low nibble first,
+    // then high nibble (matches C# SetIDPromByte).
+    // The address bytes are stored big-endian (MSB first).
     uint64_t hostId = Configuration::HostID;
-    
-    // Encode the Host ID in the PROM (implementation depends on Star requirements)
-    // For now, store the lower 48 bits (6 bytes) in the first 6 locations
     for (int i = 0; i < 6; i++) {
-        SetIDPromByte(i, static_cast<uint8_t>((hostId >> (i * 8)) & 0xFF));
+        uint8_t val = static_cast<uint8_t>((hostId >> ((5 - i) * 8)) & 0xFF);
+        SetIDPromByte(i, val);
     }
+
+    // Compute checksum over bytes 0-5 (matches C# algorithm)
+    uint8_t checksum = RotateLeft(static_cast<uint8_t>(GetIDPromByte(0) ^ GetIDPromByte(1)));
+    for (int i = 2; i < 6; i++) {
+        checksum ^= GetIDPromByte(i);
+        checksum = RotateLeft(checksum);
+    }
+    SetIDPromByte(6, checksum);
+    SetIDPromByte(7, static_cast<uint8_t>(~checksum));
 }
 
 uint8_t IOPMemoryBus::GetIDPromByte(int byteNumber) const {
-    if (byteNumber >= 0 && byteNumber < 16) {
-        return _hostIdProm[byteNumber];
+    // Each "byte" is stored as two nibbles: low nibble at [byteNumber*2],
+    // high nibble at [byteNumber*2 + 1].
+    if (byteNumber >= 0 && byteNumber < 8) {
+        return static_cast<uint8_t>(
+            (_hostIdProm[byteNumber * 2] & 0xf) |
+            (_hostIdProm[byteNumber * 2 + 1] << 4));
     }
     return 0xFF;
 }
 
 void IOPMemoryBus::SetIDPromByte(int byteNumber, uint8_t value) {
-    if (byteNumber >= 0 && byteNumber < 16) {
-        _hostIdProm[byteNumber] = value;
+    if (byteNumber >= 0 && byteNumber < 8) {
+        _hostIdProm[byteNumber * 2]     = static_cast<uint8_t>(value & 0xf);
+        _hostIdProm[byteNumber * 2 + 1] = static_cast<uint8_t>(value >> 4);
     }
 }
 

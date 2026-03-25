@@ -28,6 +28,7 @@
 
 #include "io_processor.h"
 #include "../dsystem.h"
+#include "../cp/central_processor.h"
 
 IOProcessor::IOProcessor(DSystem* system) : _system(system) {
     // Create I/O bus
@@ -54,13 +55,14 @@ IOProcessor::IOProcessor(DSystem* system) : _system(system) {
     });
     
     // Register DMA devices
-    _dma->RegisterDevice(_floppyController, 0); // Floppy on channel 0
-    // Channel 1 would be for system CP (not implemented yet)
+    _dma->RegisterDevice(_floppyController, 0);                    // Floppy on channel 0
+    _dma->RegisterDevice(_system->GetCP()->GetIO(), 1);            // CP on channel 1
     
-    // Register I/O devices
+    // Register I/O devices (matches C# IOProcessor constructor order)
     _io->RegisterDevice(_miscIO);
     _io->RegisterDevice(_floppyController);
     _io->RegisterDevice(_dma);
+    _io->RegisterDevice(_system->GetCP()->GetIO());               // CP ports 0xeb/0xec/0xee/0xf8-0xff
     _io->RegisterDevice(_tty);
     
     Reset();
@@ -94,9 +96,11 @@ void IOProcessor::Reset() {
 }
 
 int IOProcessor::Execute() {
-    // Execute DMA transfers if needed
+    // Run DMA controller; if it asserted HRQ the bus is taken – CPU doesn't run.
     _dma->Execute();
-    
+    if (_dma->HRQ()) {
+        return 4;   // A DMA cycle takes 4 clocks (matches C# behaviour)
+    }
     // Execute one CPU instruction
     return _cpu->Execute();
 }

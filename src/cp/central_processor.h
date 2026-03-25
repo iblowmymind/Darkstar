@@ -100,6 +100,9 @@ public:
     // Control-store access (used by IOP to upload/patch microcode).
     ControlStore& GetControlStore() { return _controlStore; }
 
+    // IOP-facing I/O device (implements IIOPDevice + IDMAInterface).
+    CpIo* GetIO() { return &_io; }
+
     // Diagnostics / debug.
     TaskType           CurrentTask()          const { return _currentTask; }
     int                CurrentUPC()           const { return _ctx[static_cast<int>(_currentTask)].uPC; }

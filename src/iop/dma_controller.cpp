@@ -27,6 +27,7 @@
 */
 
 #include "dma_controller.h"
+#include "io_processor.h"
 
 // Port definitions
 const std::vector<int> DMAController::_readPorts = {0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8};
@@ -56,11 +57,9 @@ void DMAController::RegisterDevice(IDMAInterface* device, int channel) {
 }
 
 bool DMAController::TC() const {
-    // Terminal count: any channel completed
-    for (int i = 0; i < 4; i++) {
-        if (_channels[i].Completed) {
-            return true;
-        }
+    // Terminal count: check the last-selected channel (matches C# semantics)
+    if (_lastSelectedChannel != -1) {
+        return _channels[_lastSelectedChannel].ChCount == 0;
     }
     return false;
 }
@@ -80,53 +79,55 @@ void DMAController::Reset() {
 }
 
 void DMAController::Execute() {
-    // Check if any enabled channel needs service
-    _hrq = false;
-    
-    for (int i = 0; i < 4; i++) {
-        DMAChannel& ch = _channels[i];
-        if (ch.Enabled && !ch.Completed && ch.Device && ch.Device->DRQ()) {
-            _hrq = true;
-            break;
-        }
-    }
-    
+    int nextChannel = SelectNextChannel();
+
+    _hrq = (nextChannel != -1);
+
     if (!_hrq) return;
-    
-    // Select next channel to service
-    int channel = SelectNextChannel();
-    if (channel < 0) return;
-    
-    DMAChannel& ch = _channels[channel];
-    if (!ch.Device || !ch.Device->DRQ() || ch.Completed) return;
-    
-    // Perform DMA transfer
-    switch (ch.Type) {
-    case DMAType::Write:
-        ch.Device->DMAWrite(0); // Data from memory (stubbed)
-        break;
-        
+
+    DMAChannel& c = _channels[nextChannel];
+
+    // Perform the actual memory↔device transfer
+    switch (c.Type) {
     case DMAType::Read:
-        ch.Device->DMARead(); // Data to memory (stubbed)
+        // Read from memory, write to device
+        {
+            uint8_t dmaWrite = _iop->Memory()->ReadByte(c.ChAddr);
+            c.Device->DMAWrite(dmaWrite);
+        }
         break;
-        
+
+    case DMAType::Write:
+        // Read from device, write to memory
+        {
+            uint8_t dmaRead = c.Device->DMARead();
+            _iop->Memory()->WriteByte(c.ChAddr, dmaRead);
+        }
+        break;
+
     case DMAType::Verify:
-        ch.Device->DMARead(); // Verify operation
+        // Verify: read from device (no memory write)
+        c.Device->DMARead();
         break;
-        
+
     case DMAType::Invalid:
         break;
     }
-    
-    // Update address and count
-    ch.ChAddr++;
-    if (ch.ChCount > 0) {
-        ch.ChCount--;
-        if (ch.ChCount == 0) {
-            ch.Completed = true;
-            ch.Device->DMAComplete();
+
+    // Increment address and decrement counter
+    c.ChAddr++;
+    c.ChCount--;
+
+    // Terminal count: stop channel if enabled and notify device
+    if (c.ChCount == 0) {
+        if (_tcStop) {
+            c.Enabled = false;
         }
+        c.Completed = true;
+        c.Device->DMAComplete();
     }
+
+    _lastSelectedChannel = nextChannel;
 }
 
 int DMAController::SelectNextChannel() {
@@ -157,74 +158,86 @@ const std::vector<int>& DMAController::WritePorts() const {
 
 void DMAController::WritePort(int port, uint8_t value) {
     if (port >= 0xa0 && port <= 0xa7) {
-        int channel = (port - 0xa0) / 2;
-        bool isCount = (port & 1) == 1;
-        
-        if (isCount) {
-            // Count register
+        int ch = (port - 0xa0) / 2;
+        bool isCount = (port & 1) != 0;
+
+        if (!isCount) {
+            // Address register (even ports 0xa0, 0xa2, 0xa4, 0xa6)
             if (_first) {
-                _channels[channel].ChCount = value;
-                _first = false;
+                _channels[ch].ChAddr = value;
             } else {
-                _channels[channel].ChCount |= (static_cast<int>(value) << 8);
-                _first = true;
+                _channels[ch].ChAddr = static_cast<uint16_t>(_channels[ch].ChAddr | (static_cast<uint16_t>(value) << 8));
             }
+            _first = !_first;
         } else {
-            // Address register
+            // Count register (odd ports 0xa1, 0xa3, 0xa5, 0xa7)
+            // First byte: low 8 bits of 14-bit count
+            // Second byte: high 6 bits [5:0] of count + DMA type in bits [7:6]
             if (_first) {
-                _channels[channel].ChAddr = value;
-                _first = false;
+                _channels[ch].ChCount = value;
             } else {
-                _channels[channel].ChAddr |= (static_cast<uint16_t>(value) << 8);
-                _first = true;
+                // Combine: 14-bit count = (LSB | ((MSB & 0x3f) << 8)) + 1
+                // Type encoded in bits [7:6] of MSB
+                _channels[ch].ChCount = (_channels[ch].ChCount | ((value & 0x3f) << 8)) + 1;
+                _channels[ch].Type    = static_cast<DMAType>(value >> 6);
             }
+            _first = !_first;
         }
     } else if (port == 0xa8) {
-        // Mode register
-        int channel = value & 0x03;
-        _channels[channel].Type = static_cast<DMAType>((value >> 2) & 0x03);
-        _channels[channel].Enabled = true;
-        
-        // Control bits
+        // Mode/control register – matches C# 8257 behaviour:
+        // bits[3:0]: channel enables (one bit per channel)
+        // bit 4: rotating priority
+        // bit 5: extended write
+        // bit 6: TC stop
+        // bit 7: autoload
+        _first = true;   // reset the two-byte latch
+        _channels[0].Enabled = (value & 0x01) != 0;
+        _channels[1].Enabled = (value & 0x02) != 0;
+        _channels[2].Enabled = (value & 0x04) != 0;
+        _channels[3].Enabled = (value & 0x08) != 0;
         _rotatingPriority = (value & 0x10) != 0;
-        _extendedWrite = (value & 0x20) != 0;
-        _tcStop = (value & 0x40) != 0;
-        _autoLoad = (value & 0x80) != 0;
+        _extendedWrite    = (value & 0x20) != 0;
+        _tcStop           = (value & 0x40) != 0;
+        _autoLoad         = (value & 0x80) != 0;
     }
 }
 
 uint8_t DMAController::ReadPort(int port) {
     if (port >= 0xa0 && port <= 0xa7) {
-        int channel = (port - 0xa0) / 2;
-        bool isCount = (port & 1) == 1;
+        int ch = (port - 0xa0) / 2;
+        bool isCount = (port & 1) != 0;
         
-        if (isCount) {
-            // Count register
-            if (_first) {
-                _first = false;
-                return static_cast<uint8_t>(_channels[channel].ChCount & 0xFF);
-            } else {
-                _first = true;
-                return static_cast<uint8_t>(_channels[channel].ChCount >> 8);
-            }
-        } else {
+        if (!isCount) {
             // Address register
             if (_first) {
                 _first = false;
-                return static_cast<uint8_t>(_channels[channel].ChAddr & 0xFF);
+                return static_cast<uint8_t>(_channels[ch].ChAddr & 0xFF);
             } else {
                 _first = true;
-                return static_cast<uint8_t>(_channels[channel].ChAddr >> 8);
+                return static_cast<uint8_t>(_channels[ch].ChAddr >> 8);
+            }
+        } else {
+            // Count register
+            if (_first) {
+                _first = false;
+                return static_cast<uint8_t>(_channels[ch].ChCount & 0xFF);
+            } else {
+                _first = true;
+                return static_cast<uint8_t>(_channels[ch].ChCount >> 8);
             }
         }
     } else if (port == 0xa8) {
-        // Status register
-        uint8_t status = 0;
-        for (int i = 0; i < 4; i++) {
-            if (_channels[i].Completed) {
-                status |= (1 << i);
-            }
-        }
+        // Status register – low 4 bits = TC (completed) flags for channels 0-3.
+        // Reading clears the completed flags (matches C# behaviour).
+        uint8_t status = static_cast<uint8_t>(
+            (_channels[0].Completed ? 0x01 : 0x00) |
+            (_channels[1].Completed ? 0x02 : 0x00) |
+            (_channels[2].Completed ? 0x04 : 0x00) |
+            (_channels[3].Completed ? 0x08 : 0x00));
+        _channels[0].Completed = false;
+        _channels[1].Completed = false;
+        _channels[2].Completed = false;
+        _channels[3].Completed = false;
         return status;
     }
     

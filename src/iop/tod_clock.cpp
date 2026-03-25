@@ -64,7 +64,7 @@ void TODClock::ClearInterrupt() {
 void TODClock::SetMode(TODAccessMode mode) {
     _mode = mode;
     if (mode == TODAccessMode::Read) {
-        _todReadBit = 31; // Start reading from MSB
+        _todReadBit = 0;  // start at 0, increment toward 31 (MSB first: 0x80000000 >> 0)
     }
 }
 
@@ -81,8 +81,8 @@ int TODClock::ReadClockBit() const {
 void TODClock::ClockBit(TODClockType type) {
     switch (type) {
     case TODClockType::Read:
-        if (_mode == TODAccessMode::Read && _todReadBit > 0) {
-            _todReadBit--;
+        if (_mode == TODAccessMode::Read && _todReadBit < 32) {
+            _todReadBit++;   // increment (matches C#: MSB-first bit order)
         }
         break;
         

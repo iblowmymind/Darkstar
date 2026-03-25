@@ -31,9 +31,29 @@
 #include "../display_controller.h"
 #include "../memory.h"
 
+// IOP-facing port lists
+const std::vector<int> CpIo::_readPorts = {
+    0xeb,  // CPDataIn
+    0xec,  // CPStatus
+    0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,  // CS microcode word bytes 0-5
+    0xfe,  // TPC high
+    0xff,  // TPC low
+};
+const std::vector<int> CpIo::_writePorts = {
+    0xeb,  // CPDataOut
+    0xec,  // CPControl
+    0xee,  // CPClrDmaComplete
+    0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,  // CS microcode word bytes a-f
+    0xfe,  // TPC high
+    0xff,  // TPC low
+};
+
 CpIo::CpIo(DSystem* system)
     : _system(system)
 {
+    _tpc.fill(0);
+    _tc.fill(0);
+    _microcode.fill(0);
     Reset();
 }
 
@@ -42,6 +62,26 @@ void CpIo::Reset()
     _mesaIntRq     = false;
     _iopOutputData = 0;
     _iopCtl        = 0;
+
+    // CP↔IOP communication state – mirrors C# CentralProcessorIO defaults
+    // All C# bools default to false; active-low flags therefore begin asserted.
+    _cpOutIntReq_   = false;
+    _cpInIntReq_    = false;
+    _cpDmaComplete_ = false;
+    _cpDmaMode      = false;
+    _cpDmaIn        = false;
+    _cpAttn         = false;
+    _emuWake        = false;
+    _wakeMode0      = false;
+    _wakeMode1      = false;
+    _iopReq         = false;
+    _iopAttn        = false;
+    _inLatched      = false;
+    _outLatched     = false;
+    _cpInData       = 0;
+    _cpOutData      = 0;
+    _tpcAddr        = 0;
+    _tpcTemp        = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,11 +133,12 @@ void CpIo::ExecuteIOOut(const Microinstruction& mi,
 
         case YIOOutFunction::IOPOData:
             _iopOutputData = aluOut;
+            WriteCPInBuffer(static_cast<uint8_t>(aluOut & 0xff));
             break;
 
         case YIOOutFunction::IOPCtl:
             _iopCtl = aluOut;
-            // TODO: trigger RST7.5 interrupt on the IOP CPU.
+            WriteIOPCtl(static_cast<uint8_t>(aluOut & 0xff));
             break;
 
         // Keyboard, ethernet, printer, and invalid function codes are
@@ -143,7 +184,205 @@ uint16_t CpIo::ExecuteIOXIn(const Microinstruction& mi,
         case ZIOXIn::ReadibNA:
             return static_cast<uint16_t>(ctx.ibPtr);
 
+        case ZIOXIn::ReadIOPIData:
+            return static_cast<uint16_t>(ReadIOPData());
+
+        case ZIOXIn::ReadIOPStatus:
+            return static_cast<uint16_t>(ReadIOPStatus());
+
         default:
             return 0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// IIOPDevice implementation – IOP 8085 port access
+// ---------------------------------------------------------------------------
+
+const std::vector<int>& CpIo::ReadPorts() const  { return _readPorts; }
+const std::vector<int>& CpIo::WritePorts() const { return _writePorts; }
+
+void CpIo::WritePort(int port, uint8_t value)
+{
+    switch (port)
+    {
+        case 0xeb:  // CPDataOut – IOP writes data for CP to read
+            WriteCPInBuffer(value);
+            break;
+
+        case 0xec:  // CPControl – IOP control word
+            WriteIOPCtl(value);
+            break;
+
+        case 0xee:  // CPClrDmaComplete
+            _cpDmaComplete_ = false;
+            break;
+
+        case 0xf8: case 0xf9: case 0xfa:
+        case 0xfb: case 0xfc: case 0xfd:
+            // CS microcode word bytes a–f (complemented values from IOP)
+            WriteIOPMicrocodeWord(port - 0xf8, static_cast<uint8_t>(~value));
+            break;
+
+        case 0xfe:  // TPC high : TPCAddr[0:2],,TPCData[0:4]'
+            _tpcAddr = value >> 5;
+            _tpcTemp = ((~value & 0x1f) << 7);
+            break;
+
+        case 0xff:  // TPC low : don't care,,TPCData[5:11]'
+            if (_tpcAddr < static_cast<int>(_tpc.size()))
+                _tpc[_tpcAddr] = _tpcTemp | (~value & 0x7f);
+            break;
+
+        default:
+            break;
+    }
+}
+
+uint8_t CpIo::ReadPort(int port)
+{
+    switch (port)
+    {
+        case 0xeb:  // CPDataIn – IOP reads data the CP sent
+            return ReadCPOutBuffer();
+
+        case 0xec:  // CPStatus
+            return ReadCPStatus();
+
+        case 0xf8: case 0xf9: case 0xfa:
+        case 0xfb: case 0xfc: case 0xfd:
+            return ReadIOPMicrocodeWord(port - 0xf8);
+
+        case 0xfe:  // TPC high : TC[0:3],,TPCData[0:3]'
+            if (_tpcAddr < static_cast<int>(_tpc.size()))
+                return static_cast<uint8_t>(
+                    ~((~_tc[_tpcAddr] << 4) | ((_tpc[_tpcAddr] & 0xf00) >> 8)));
+            return 0xff;
+
+        case 0xff:  // TPC low : TPCData[4:11]'
+            if (_tpcAddr < static_cast<int>(_tpc.size()))
+                return static_cast<uint8_t>(~_tpc[_tpcAddr]);
+            return 0xff;
+
+        default:
+            return 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IDMAInterface implementation
+// ---------------------------------------------------------------------------
+
+bool CpIo::DRQ()
+{
+    if (_cpDmaMode)
+    {
+        if (_cpDmaIn)
+            return _outLatched;   // CP has output data waiting for IOP to DMA-read
+        else
+            return !_inLatched;   // IOP→CP buffer is empty: CP wants more data via DMA
+    }
+    return false;
+}
+
+void CpIo::DMAWrite(uint8_t value)
+{
+    WriteCPInBuffer(value);
+}
+
+uint8_t CpIo::DMARead()
+{
+    return ReadCPOutBuffer();
+}
+
+void CpIo::DMAComplete()
+{
+    _cpDmaComplete_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+uint8_t CpIo::ReadCPOutBuffer()
+{
+    _outLatched = false;
+    // Signal IOP: CP has read the data (active-low flag goes inactive)
+    _cpInIntReq_ = true;
+    return _cpOutData;
+}
+
+void CpIo::WriteCPInBuffer(uint8_t value)
+{
+    // Signal IOP→CP data pending (active-low flag goes active)
+    _cpOutIntReq_ = true;
+    _cpOutData    = value;
+    _inLatched    = true;
+}
+
+uint8_t CpIo::ReadIOPData()
+{
+    _inLatched    = false;
+    // CP has read data; raise active-low flag to say buffer is clear
+    _cpOutIntReq_ = false;
+    return _cpInData;
+}
+
+uint8_t CpIo::ReadCPStatus() const
+{
+    return static_cast<uint8_t>(
+        (_cpDmaComplete_              ? static_cast<uint8_t>(CPStatusFlags::CPDmaComplete_) : 0) |
+        (!_cpOutIntReq_               ? static_cast<uint8_t>(CPStatusFlags::CPOutIntReq_)  : 0) |
+        (!_cpInIntReq_                ? static_cast<uint8_t>(CPStatusFlags::CPInIntReq_)   : 0) |
+        (!_cpDmaIn                    ? static_cast<uint8_t>(CPStatusFlags::CPDmaIn_)      : 0) |
+        (!_cpDmaMode                  ? static_cast<uint8_t>(CPStatusFlags::CPDmaMode_)    : 0) |
+        (_emuWake                     ? static_cast<uint8_t>(CPStatusFlags::EmuWake)       : 0) |
+        (!_cpAttn                     ? static_cast<uint8_t>(CPStatusFlags::CPAttn)        : 0));
+}
+
+void CpIo::WriteIOPCtl(uint8_t value)
+{
+    _wakeMode1 = (value & static_cast<uint8_t>(IOPCtlFlags::WakeMode1)) != 0;
+    _wakeMode0 = (value & static_cast<uint8_t>(IOPCtlFlags::WakeMode0)) != 0;
+    _cpAttn    = (value & static_cast<uint8_t>(IOPCtlFlags::CPAttn))    != 0;
+    _emuWake   = (value & static_cast<uint8_t>(IOPCtlFlags::EmuWake))   != 0;
+}
+
+uint8_t CpIo::ReadIOPStatus() const
+{
+    return static_cast<uint8_t>(
+        (_iopReq    ? static_cast<uint8_t>(IOPStatusFlags::IOPReq)    : 0) |
+        (!_wakeMode1? static_cast<uint8_t>(IOPStatusFlags::WakeMode1_): 0) |
+        (!_wakeMode0? static_cast<uint8_t>(IOPStatusFlags::WakeMode0_): 0) |
+        (!_cpAttn   ? static_cast<uint8_t>(IOPStatusFlags::CPAttn_)   : 0) |
+        (!_emuWake  ? static_cast<uint8_t>(IOPStatusFlags::EmuWake_)  : 0) |
+        (_iopAttn   ? static_cast<uint8_t>(IOPStatusFlags::IOPAttn)   : 0));
+}
+
+void CpIo::WriteIOPMicrocodeWord(int b, uint8_t value)
+{
+    // TPC register 6 is always used for IOP microcode writes.
+    int tpc6 = _tpc[6];
+    if (tpc6 < 0 || tpc6 >= static_cast<int>(_microcode.size())) return;
+    uint64_t word = _microcode[tpc6];
+    // Bytes are ordered: CSa=byte0 (MSB bits 47-40) … CSf=byte5 (LSB bits 7-0)
+    // From SysDefs.asm:
+    //   CSa: rA[0:3],,rB[0:3]
+    //   CSb: aS[0:2],,aF[0:2],,aD[0:1]
+    //   CSc: EP,,CIN,,EnSU,,mem,,fS[0:3]
+    //   CSd: fY[0:3], INIA[0:3]
+    //   CSe: fX[0:3], INIA[4:7]
+    //   CSf: fZ[0:3], INIA[8:11]
+    int shift = (5 - b) * 8;
+    word = (word & ~(static_cast<uint64_t>(0xff) << shift)) |
+           (static_cast<uint64_t>(value) << shift);
+    _microcode[tpc6] = word;
+}
+
+uint8_t CpIo::ReadIOPMicrocodeWord(int b) const
+{
+    int tpc6 = _tpc[6];
+    if (tpc6 < 0 || tpc6 >= static_cast<int>(_microcode.size())) return 0;
+    int shift = (5 - b) * 8;
+    return static_cast<uint8_t>((_microcode[tpc6] >> shift) & 0xff);
 }
