@@ -94,6 +94,9 @@ set(DEBUGGER_SOURCES
     src/debugger/debugger_main.cpp
     src/debugger/cp_debugger.cpp
     src/debugger/iop_debugger.cpp
+    src/debugger/load_map_dialog.cpp
+    src/debugger/microcode_display.cpp
+    src/debugger/source_display.cpp
 )
 
 set(UI_SOURCES
